@@ -1,0 +1,17 @@
+{
+  "id": "com.alpine.claude-code-usage",
+  "name": "Claude Code Usage",
+  "version": "0.1.5",
+  "author": "Alpine Shell Team",
+  "icon": "assets/icon.png",
+  "main": "backend.js",
+  "contributes": {
+    "topbarWidgets": [{ "slot": "left", "order": 0 }]
+  },
+  "marketplace": {
+    "shortDescription": "Claude Code session & weekly limits, live in your topbar.",
+    "readme": "README.md",
+    "category": "developer",
+    "keywords": ["claude", "claude code", "usage", "ai", "limits", "topbar"]
+  }
+}
