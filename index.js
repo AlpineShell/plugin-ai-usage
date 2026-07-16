@@ -26,7 +26,10 @@ function formatReset(ms) {
 function LimitRow({ limit, dark }) {
   const base = dark ? '0,0,0' : '255,255,255'
   const ratio = Math.max(0, Math.min(1, limit.percent / 100))
-  const reset = formatReset(limit.resetsAtMs)
+  // A not-yet-started session has no meaningful reset countdown — say so instead.
+  const notStarted = limit.kind === 'session' && limit.active === false
+  const reset = notStarted ? null : formatReset(limit.resetsAtMs)
+  const footer = notStarted ? 'session not started' : reset
   return html`
     <div style=${{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
       <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '20px' }}>
@@ -36,14 +39,14 @@ function LimitRow({ limit, dark }) {
       <div style=${{ height: '5px', borderRadius: '999px', background: `rgba(${base},${dark ? 0.12 : 0.18})`, overflow: 'hidden' }}>
         <div style=${{ width: ratio * 100 + '%', height: '100%', borderRadius: '999px', background: fillColor(limit.percent, dark) }} />
       </div>
-      ${reset && html`<span style=${{ fontSize: '10px', color: `rgba(${base},0.45)` }}>${reset}</span>`}
+      ${footer && html`<span style=${{ fontSize: '10px', color: `rgba(${base},0.45)` }}>${footer}</span>`}
     </div>
   `
 }
 
 function UsagePanel({ usage, dark }) {
   const rows = usage.limits && usage.limits.length ? usage.limits : [
-    { key: 'session', label: 'Session · 5h', percent: usage.sessionPercent, resetsAtMs: usage.sessionResetsAtMs },
+    { key: 'session', kind: 'session', label: 'Session · 5h', percent: usage.sessionPercent, resetsAtMs: usage.sessionResetsAtMs, active: usage.sessionActive !== false },
   ]
   return html`
     <div style=${{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '12px', minWidth: '200px' }}>
