@@ -15,6 +15,7 @@ function emptyUsage() {
     ok: false,
     sessionPercent: 0,
     sessionResetsAtMs: null,
+    sessionActive: false,
     limits: [],
     subscriptionType: null,
     updatedAtMs: 0,
@@ -51,22 +52,38 @@ function mapLimits(data) {
     key:
       (limit.kind || 'limit') +
       (limit.scope && limit.scope.model && limit.scope.model.display_name ? ':' + limit.scope.model.display_name : ''),
+    kind: limit.kind || 'limit',
     label: labelForLimit(limit),
     percent: typeof limit.percent === 'number' ? limit.percent : 0,
     resetsAtMs: resetMs(limit.resets_at),
+    // The API marks a window `is_active: false` before it has started (e.g. no
+    // session opened yet). Treat a missing flag as active for back-compat.
+    active: limit.is_active !== false,
     severity: limit.severity || 'normal',
   }))
   const extra = data.extra_usage
   if (extra && extra.is_enabled && typeof extra.utilization === 'number') {
-    limits.push({ key: 'extra', label: 'Extra usage', percent: extra.utilization, resetsAtMs: null, severity: 'normal' })
+    limits.push({ key: 'extra', kind: 'extra', label: 'Extra usage', percent: extra.utilization, resetsAtMs: null, active: true, severity: 'normal' })
   }
   return limits
 }
 
 function sessionPercentFrom(data, limits) {
   if (data.five_hour && typeof data.five_hour.utilization === 'number') return data.five_hour.utilization
-  const session = limits.find((l) => l.key.split(':')[0] === 'session')
+  const session = limits.find((l) => l.kind === 'session')
   return session ? session.percent : 0
+}
+
+// A session is "not started" until the first message opens the 5h window. The
+// API signals this with `is_active: false` on the session limit; fall back to
+// the five_hour window (any usage, or a future reset) when the flag is absent.
+function sessionActiveFrom(data, limits) {
+  const session = limits.find((l) => l.kind === 'session')
+  if (session) return session.active
+  const fh = data.five_hour
+  if (!fh || typeof fh.utilization !== 'number') return false
+  const reset = resetMs(fh.resets_at)
+  return fh.utilization > 0 || (reset != null && reset > Date.now())
 }
 
 async function fetchUsage() {
@@ -97,6 +114,7 @@ async function fetchUsage() {
     ok: true,
     sessionPercent: sessionPercentFrom(data, limits),
     sessionResetsAtMs: resetMs(data.five_hour && data.five_hour.resets_at),
+    sessionActive: sessionActiveFrom(data, limits),
     limits,
     subscriptionType: oauth.subscriptionType || null,
     updatedAtMs: Date.now(),
