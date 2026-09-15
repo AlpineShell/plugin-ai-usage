@@ -1,15 +1,9 @@
 # Claude Code Usage
 
-Shows your **Claude Code subscription usage** as a compact bar in the Alpine Shell
-topbar (left of the clock, right of the power menu), colored **white → orange → red**
-as you approach a limit. Hover for a breakdown of every window — **Session (5h)**,
-**Weekly**, and per-model — each with its percentage and reset countdown.
+Your Claude Code limits on Ridge: a small bar that turns white, then orange, then red as you near a limit.
 
-The data is the same the `/usage` command shows, read live by the shell from your
-local Claude Code login. This widget just renders it — it makes no network calls and
-requests **no special permissions**.
+![The usage breakdown on Ridge](docs/usage.png)
 
-## Requirements
+Hover it for every limit: the 5-hour session, the week and each model, with the percentage used and when it resets. Before your first message, the session shows as not started.
 
-Alpine Shell provides the `claude-usage` data channel (from the bundled Claude
-usage module), so this plugin works out of the box once installed — no setup.
+Once a minute the plugin reads your local Claude Code login and asks Anthropic's usage endpoint for the numbers `/usage` shows. It sends nothing anywhere else, and there is nothing to set up.

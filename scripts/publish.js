@@ -192,6 +192,45 @@ async function updateCatalog(client, bucket, entry) {
   await putObject(client, bucket, CATALOG_KEY, JSON.stringify(catalog, null, 2), 'application/json', NO_CACHE)
 }
 
+const IMAGE_TYPES = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+}
+const README_IMAGE = /!\[([^\]]*)\]\(([^)\s]+)((?:\s+"[^"]*")?)\)/g
+
+function isRelativeAsset(reference) {
+  return !/^[a-z][a-z0-9+.-]*:/i.test(reference) && !reference.startsWith('/') && !reference.startsWith('#')
+}
+
+function readmeImageFile(readmeDir, reference) {
+  const filePath = path.resolve(readmeDir, reference)
+  const rel = path.relative(ROOT, filePath)
+  if (rel.startsWith('..') || path.isAbsolute(rel)) fail(`README image escapes the plugin: ${reference}`)
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) fail(`README image not found: ${reference}`)
+  const contentType = IMAGE_TYPES[path.extname(filePath).toLowerCase()]
+  if (!contentType) fail(`README image type not supported: ${reference}`)
+  return { filePath, rel: rel.split(path.sep).join('/'), contentType }
+}
+
+async function publishReadmeImages(client, bucket, id, version, readmeDir, readmeText) {
+  const uploaded = new Map()
+  for (const match of readmeText.matchAll(README_IMAGE)) {
+    const reference = match[2]
+    if (!isRelativeAsset(reference) || uploaded.has(reference)) continue
+    const { filePath, rel, contentType } = readmeImageFile(readmeDir, reference)
+    const key = `plugins/${id}/${version}/${rel}`
+    await putObject(client, bucket, key, fs.readFileSync(filePath), contentType, IMMUTABLE)
+    uploaded.set(reference, key)
+  }
+  return readmeText.replace(README_IMAGE, (whole, alt, reference, title) =>
+    uploaded.has(reference) ? `![${alt}](${uploaded.get(reference)}${title})` : whole
+  )
+}
+
 async function publish() {
   loadEnvFile(path.join(ROOT, '.env'))
   const manifest = readAndValidateManifest()
@@ -231,6 +270,7 @@ async function publish() {
       const readmePath = path.join(ROOT, mkt.readme)
       if (fs.existsSync(readmePath) && fs.statSync(readmePath).isFile()) {
         readmeText = fs.readFileSync(readmePath, 'utf8')
+        readmeText = await publishReadmeImages(client, config.bucket, id, version, path.dirname(readmePath), readmeText)
         readmeUrl = `plugins/${id}/README.md`
         await putObject(client, config.bucket, readmeUrl, Buffer.from(readmeText), 'text/markdown', NO_CACHE)
       }
