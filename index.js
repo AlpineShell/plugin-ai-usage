@@ -1,14 +1,25 @@
-const { html, usePluginData, useDarkText, PopupMenu } = window.alpine
+const { html, usePluginData, useDarkText, useState, useEffect, PopupMenu } = window.alpine
 
 const WARN_PCT = 70
 const DANGER_PCT = 90
 const BAR_WIDTH = 132
 const BAR_HEIGHT = 8
+const STALE_MS = 5 * 60000
 
-function fillColor(pct, dark) {
+function fillColor(pct, dark, stale) {
+  if (stale) return dark ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.35)'
   if (pct >= DANGER_PCT) return 'rgba(239,68,68,0.95)'
   if (pct >= WARN_PCT) return 'rgba(245,158,11,0.95)'
   return dark ? 'rgba(0,0,0,0.8)' : 'rgba(255,255,255,0.9)'
+}
+
+function failureText(reason) {
+  if (reason === 'signed-out') return 'Sign in to Claude Code to see your usage'
+  if (reason === 'expired') return 'Open Claude Code to refresh your login'
+  if (reason === 'offline') return "Can't reach Anthropic"
+  if (reason === 'rate-limited') return 'Too many requests, trying again soon'
+  if (reason && reason.startsWith('http-')) return 'Usage unavailable (HTTP ' + reason.slice(5) + ')'
+  return 'Usage unavailable'
 }
 
 function formatReset(ms) {
@@ -21,6 +32,23 @@ function formatReset(ms) {
   if (hours < 24) return 'resets in ' + hours + 'h'
   const days = Math.round(hours / 24)
   return 'resets in ' + days + 'd'
+}
+
+function formatAge(ms, now) {
+  const mins = Math.max(0, Math.round((now - ms) / 60000))
+  if (mins < 60) return 'updated ' + mins + 'm ago'
+  const hours = Math.round(mins / 60)
+  if (hours < 24) return 'updated ' + hours + 'h ago'
+  return 'updated ' + Math.round(hours / 24) + 'd ago'
+}
+
+function useNow(everyMs) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), everyMs)
+    return () => clearInterval(timer)
+  }, [everyMs])
+  return now
 }
 
 function LimitRow({ limit, dark }) {
@@ -44,14 +72,25 @@ function LimitRow({ limit, dark }) {
   `
 }
 
-function UsagePanel({ usage, dark }) {
+function UsagePanel({ usage, dark, stale, now }) {
+  const base = dark ? '0,0,0' : '255,255,255'
   const rows = usage.limits && usage.limits.length ? usage.limits : [
     { key: 'session', kind: 'session', label: 'Session · 5h', percent: usage.sessionPercent, resetsAtMs: usage.sessionResetsAtMs, active: usage.sessionActive !== false },
   ]
   return html`
     <div style=${{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '12px', minWidth: '200px' }}>
-      ${rows.map((limit) => html`<${LimitRow} key=${limit.key || limit.label} limit=${limit} dark=${dark} />`)}
+      <div style=${{ display: 'flex', flexDirection: 'column', gap: '12px', filter: stale ? 'grayscale(1)' : 'none', opacity: stale ? 0.6 : 1 }}>
+        ${rows.map((limit) => html`<${LimitRow} key=${limit.key || limit.label} limit=${limit} dark=${dark} />`)}
+      </div>
+      ${stale && html`<span style=${{ fontSize: '10px', color: `rgba(${base},0.45)` }}>${formatAge(usage.updatedAtMs, now)}</span>`}
     </div>
+  `
+}
+
+function FailurePanel({ reason, dark }) {
+  const base = dark ? '0,0,0' : '255,255,255'
+  return html`
+    <div style=${{ padding: '12px 14px', fontSize: '12px', color: `rgba(${base},0.8)`, whiteSpace: 'nowrap' }}>${failureText(reason)}</div>
   `
 }
 
@@ -66,9 +105,12 @@ const SWEEP_KEYFRAMES =
 export default function UsageBar() {
   const dark = useDarkText()
   const usage = usePluginData('claude-usage', null)
+  const now = useNow(30000)
   const base = dark ? '0,0,0' : '255,255,255'
-  const loading = !usage || !usage.ok
-  const pct = usage ? usage.sessionPercent : 0
+  const loading = !usage
+  const failed = !!usage && !usage.ok
+  const stale = !!usage && usage.ok && now - usage.updatedAtMs > STALE_MS
+  const pct = usage && usage.ok ? usage.sessionPercent : 0
   const ratio = Math.max(0, Math.min(1, pct / 100))
 
   const fill = loading
@@ -91,7 +133,7 @@ export default function UsageBar() {
             width: ratio * 100 + '%',
             height: '100%',
             borderRadius: '999px',
-            background: fillColor(pct, dark),
+            background: fillColor(pct, dark, stale),
             transition: 'width 400ms ease, background 300ms ease',
           }}
         />
@@ -104,7 +146,7 @@ export default function UsageBar() {
           width: BAR_WIDTH + 'px',
           height: BAR_HEIGHT + 'px',
           borderRadius: '999px',
-          background: `rgba(${base},${dark ? 0.15 : 0.2})`,
+          background: failed ? `rgba(${base},${dark ? 0.07 : 0.1})` : `rgba(${base},${dark ? 0.15 : 0.2})`,
           overflow: 'hidden',
         }}
       >
@@ -114,5 +156,8 @@ export default function UsageBar() {
   `
 
   if (loading) return trigger
-  return html`<${PopupMenu} trigger=${trigger}><${UsagePanel} usage=${usage} dark=${dark} /><//>`
+  const panel = failed
+    ? html`<${FailurePanel} reason=${usage.reason} dark=${dark} />`
+    : html`<${UsagePanel} usage=${usage} dark=${dark} stale=${stale} now=${now} />`
+  return html`<${PopupMenu} trigger=${trigger}>${panel}<//>`
 }

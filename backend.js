@@ -8,7 +8,18 @@ const path = require('path')
 const fs = require('fs')
 
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
-const CREDENTIALS_FILE = path.join(os.homedir(), '.claude', '.credentials.json')
+const TIMEOUT_MS = 15000
+const STALE_MS = 5 * 60000
+const RATE_LIMIT_BACKOFF_MS = 5 * 60000
+const MAX_BACKOFF_MS = 60 * 60000
+
+let lastGood = null
+let retryAtMs = 0
+
+function credentialsFile() {
+  const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
+  return path.join(dir, '.credentials.json')
+}
 
 function emptyUsage() {
   return {
@@ -22,12 +33,16 @@ function emptyUsage() {
   }
 }
 
+// Only a missing file means signed out. Claude Code rewrites this file when it
+// refreshes the token, so any other read or parse error is thrown and treated
+// as a passing failure that keeps the last numbers.
 function readOAuth() {
   try {
-    const parsed = JSON.parse(fs.readFileSync(CREDENTIALS_FILE, 'utf8'))
-    return parsed.claudeAiOauth || null
-  } catch {
-    return null
+    const parsed = JSON.parse(fs.readFileSync(credentialsFile(), 'utf8'))
+    return (parsed && parsed.claudeAiOauth) || null
+  } catch (error) {
+    if (error.code === 'ENOENT') return null
+    throw error
   }
 }
 
@@ -86,9 +101,33 @@ function sessionActiveFrom(data, limits) {
   return fh.utilization > 0 || (reset != null && reset > Date.now())
 }
 
+// Sign-in problems publish a failure right away. Anything else keeps the last
+// numbers for a few minutes so one dropped request does not blank the bar.
+function failure(reason) {
+  if (reason === 'signed-out' || reason === 'expired') lastGood = null
+  else if (lastGood && Date.now() - lastGood.updatedAtMs < STALE_MS) return lastGood
+  return { ...emptyUsage(), reason, updatedAtMs: Date.now() }
+}
+
+function retryDelayMs(header) {
+  const seconds = Number(header)
+  const ms = header && Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - Date.now()
+  if (!Number.isFinite(ms)) return RATE_LIMIT_BACKOFF_MS
+  return Math.max(0, Math.min(ms, MAX_BACKOFF_MS))
+}
+
+// Never refresh the token here: that would rotate Claude Code's refresh token
+// and sign the user out of Claude Code.
 async function fetchUsage() {
-  const oauth = readOAuth()
-  if (!oauth || !oauth.accessToken) return null
+  let oauth
+  try {
+    oauth = readOAuth()
+  } catch {
+    return failure('bad-response')
+  }
+  if (!oauth || !oauth.accessToken) return failure('signed-out')
+  if (typeof oauth.expiresAt === 'number' && oauth.expiresAt <= Date.now()) return failure('expired')
+  if (Date.now() < retryAtMs) return failure('rate-limited')
   let res
   try {
     res = await fetch(USAGE_URL, {
@@ -98,19 +137,26 @@ async function fetchUsage() {
         'anthropic-version': '2023-06-01',
         'User-Agent': 'alpine-shell',
       },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
     })
   } catch {
-    return null
+    return failure('offline')
   }
-  if (!res.ok) return null
+  if (res.status === 401) return failure('expired')
+  if (res.status === 429) {
+    retryAtMs = Date.now() + retryDelayMs(res.headers.get('retry-after'))
+    return failure('rate-limited')
+  }
+  if (!res.ok) return failure('http-' + res.status)
   let data
   try {
     data = await res.json()
   } catch {
-    return null
+    return failure('bad-response')
   }
+  if (!data || typeof data !== 'object') return failure('bad-response')
   const limits = mapLimits(data)
-  return {
+  lastGood = {
     ok: true,
     sessionPercent: sessionPercentFrom(data, limits),
     sessionResetsAtMs: resetMs(data.five_hour && data.five_hour.resets_at),
@@ -119,6 +165,7 @@ async function fetchUsage() {
     subscriptionType: oauth.subscriptionType || null,
     updatedAtMs: Date.now(),
   }
+  return lastGood
 }
 
 module.exports = (ctx) => ctx.poll('claude-usage', fetchUsage, 60000)
