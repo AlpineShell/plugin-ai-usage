@@ -2,6 +2,7 @@
   "name": "plugin-claude-code-usage",
   "private": true,
   "scripts": {
+    "test": "node --test test/*.test.js",
     "publish": "node scripts/publish.js"
   },
   "dependencies": {
