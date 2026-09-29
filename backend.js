@@ -33,12 +33,16 @@ function emptyUsage() {
   }
 }
 
+// Only a missing file means signed out. Claude Code rewrites this file when it
+// refreshes the token, so any other read or parse error is thrown and treated
+// as a passing failure that keeps the last numbers.
 function readOAuth() {
   try {
     const parsed = JSON.parse(fs.readFileSync(credentialsFile(), 'utf8'))
-    return parsed.claudeAiOauth || null
-  } catch {
-    return null
+    return (parsed && parsed.claudeAiOauth) || null
+  } catch (error) {
+    if (error.code === 'ENOENT') return null
+    throw error
   }
 }
 
@@ -115,7 +119,12 @@ function retryDelayMs(header) {
 // Never refresh the token here: that would rotate Claude Code's refresh token
 // and sign the user out of Claude Code.
 async function fetchUsage() {
-  const oauth = readOAuth()
+  let oauth
+  try {
+    oauth = readOAuth()
+  } catch {
+    return failure('bad-response')
+  }
   if (!oauth || !oauth.accessToken) return failure('signed-out')
   if (typeof oauth.expiresAt === 'number' && oauth.expiresAt <= Date.now()) return failure('expired')
   if (Date.now() < retryAtMs) return failure('rate-limited')
