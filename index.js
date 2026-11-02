@@ -45,9 +45,10 @@ function LimitRow({ limit, dark }) {
 }
 
 function UsagePanel({ usage, dark }) {
-  const rows = usage.limits && usage.limits.length ? usage.limits : [
-    { key: 'session', kind: 'session', label: 'Session · 5h', percent: usage.sessionPercent, resetsAtMs: usage.sessionResetsAtMs, active: usage.sessionActive !== false },
-  ]
+  const fallback = usage.barKind === 'weekly'
+    ? { key: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: usage.barPercent, resetsAtMs: usage.barResetsAtMs, active: true }
+    : { key: 'session', kind: 'session', label: 'Session · 5h', percent: usage.sessionPercent, resetsAtMs: usage.sessionResetsAtMs, active: usage.sessionActive !== false }
+  const rows = usage.limits && usage.limits.length ? usage.limits : [fallback]
   return html`
     <div style=${{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '12px', minWidth: '200px' }}>
       ${rows.map((limit) => html`<${LimitRow} key=${limit.key || limit.label} limit=${limit} dark=${dark} />`)}
@@ -68,7 +69,8 @@ export default function UsageBar() {
   const usage = usePluginData('claude-usage', null)
   const base = dark ? '0,0,0' : '255,255,255'
   const loading = !usage || !usage.ok
-  const pct = usage ? usage.sessionPercent : 0
+  // Older backends only send sessionPercent.
+  const pct = !usage ? 0 : typeof usage.barPercent === 'number' ? usage.barPercent : usage.sessionPercent
   const ratio = Math.max(0, Math.min(1, pct / 100))
 
   const fill = loading
