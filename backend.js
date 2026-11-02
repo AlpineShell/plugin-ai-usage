@@ -86,6 +86,28 @@ function sessionActiveFrom(data, limits) {
   return fh.utilization > 0 || (reset != null && reset > Date.now())
 }
 
+function hasSessionLimit(data, limits) {
+  if (limits.some((l) => l.kind === 'session')) return true
+  return !!(data.five_hour && typeof data.five_hour.utilization === 'number')
+}
+
+// The limit the topbar bar shows. Plans with a 5-hour session limit show the
+// session. Plans without one (Max 20x no longer has it: the API sends
+// `five_hour: null` and no `session` limit) show the weekly limit instead of
+// an empty bar.
+function barFrom(data, limits) {
+  if (hasSessionLimit(data, limits)) {
+    return { kind: 'session', percent: sessionPercentFrom(data, limits), resetsAtMs: resetMs(data.five_hour && data.five_hour.resets_at) }
+  }
+  const weekly = limits.find((l) => l.kind === 'weekly_all')
+  if (weekly) return { kind: 'weekly', percent: weekly.percent, resetsAtMs: weekly.resetsAtMs }
+  const sevenDay = data.seven_day
+  if (sevenDay && typeof sevenDay.utilization === 'number') {
+    return { kind: 'weekly', percent: sevenDay.utilization, resetsAtMs: resetMs(sevenDay.resets_at) }
+  }
+  return { kind: 'session', percent: 0, resetsAtMs: null }
+}
+
 async function fetchUsage() {
   const oauth = readOAuth()
   if (!oauth || !oauth.accessToken) return null
@@ -110,8 +132,12 @@ async function fetchUsage() {
     return null
   }
   const limits = mapLimits(data)
+  const bar = barFrom(data, limits)
   return {
     ok: true,
+    barKind: bar.kind,
+    barPercent: bar.percent,
+    barResetsAtMs: bar.resetsAtMs,
     sessionPercent: sessionPercentFrom(data, limits),
     sessionResetsAtMs: resetMs(data.five_hour && data.five_hour.resets_at),
     sessionActive: sessionActiveFrom(data, limits),
