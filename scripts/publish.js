@@ -11,7 +11,7 @@ const CATALOG_KEY = 'plugins/index.json'
 const CATALOG_SCHEMA_VERSION = 1
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]*$/
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
-const PACK_INCLUDE = ['plugin.json', 'index.js', 'backend.js', 'README.md', 'assets']
+const PACK_INCLUDE = ['plugin.json', 'index.js', 'backend.js', 'lib', 'README.md', 'assets']
 
 const bundleKey = (id, version) => `plugins/${id}/${version}/${id}-${version}${PACKAGE_EXT}`
 const latestKey = (id) => `plugins/${id}/latest.json`

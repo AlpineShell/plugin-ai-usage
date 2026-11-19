@@ -1,0 +1,8 @@
+test/
+scripts/
+package.json
+package-lock.json
+bun.lock
+.env
+.env.*
+.*

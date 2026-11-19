@@ -1,7 +1,8 @@
 {
-  "name": "plugin-claude-code-usage",
+  "name": "plugin-ai-usage",
   "private": true,
   "scripts": {
+    "test": "bun test",
     "publish": "node scripts/publish.js"
   },
   "dependencies": {
