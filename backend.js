@@ -1,43 +1,42 @@
 const {
   fetchClaudeUsage,
-  fetchGeminiUsage,
+  fetchAntigravityUsage,
   fetchOpencodeUsage,
   resolveOpencodeKey,
   saveOpencodeKey,
 } = require('./lib/providers')
+const { PROVIDER_IDS, readEnabledProviders, setProviderEnabled } = require('./lib/providerPrefs')
 
 const CHANNEL = 'alpine-shell.ai-usage/usage'
 const POLL_INTERVAL_MS = 60000
 const PROVIDER_FETCHERS = {
   claude: fetchClaudeUsage,
-  gemini: fetchGeminiUsage,
+  antigravity: fetchAntigravityUsage,
   opencode: fetchOpencodeUsage,
 }
-const PROVIDER_SETTING_KEYS = {
-  claude: 'claudeEnabled',
-  gemini: 'geminiEnabled',
-  opencode: 'opencodeEnabled',
-}
-
-function isProviderEnabled(settings, providerId) {
-  const value = settings.get(PROVIDER_SETTING_KEYS[providerId])
-  return value !== false
-}
+const STALE_FALLBACK_STATUSES = new Set(['error', 'expired'])
 
 module.exports = (ctx) => {
   const lastOk = {}
   let activeRefresh = null
 
+  function providerStatus() {
+    const key = resolveOpencodeKey({ dataDir: ctx.dataDir })
+    return {
+      enabled: readEnabledProviders(ctx.dataDir),
+      opencodeKey: { configured: Boolean(key.key), source: key.source },
+    }
+  }
+
   async function refresh() {
     if (activeRefresh) return activeRefresh
     activeRefresh = (async () => {
+      const enabled = readEnabledProviders(ctx.dataDir)
       const providers = {}
-      const enabledIds = Object.keys(PROVIDER_FETCHERS).filter((id) => isProviderEnabled(ctx.settings, id))
+      const enabledIds = PROVIDER_IDS.filter((id) => enabled[id])
 
-      for (const id of Object.keys(PROVIDER_FETCHERS)) {
-        if (!enabledIds.includes(id)) {
-          delete lastOk[id]
-        }
+      for (const id of PROVIDER_IDS) {
+        if (!enabled[id]) delete lastOk[id]
       }
 
       await Promise.all(
@@ -48,7 +47,7 @@ module.exports = (ctx) => {
             providers[id] = result
             return
           }
-          if (result.status === 'error' && lastOk[id]) {
+          if (STALE_FALLBACK_STATUSES.has(result.status) && lastOk[id]) {
             providers[id] = { ...lastOk[id], stale: true }
             return
           }
@@ -57,7 +56,7 @@ module.exports = (ctx) => {
         }),
       )
 
-      const payload = { providers, updatedAtMs: Date.now() }
+      const payload = { providers, enabled, updatedAtMs: Date.now() }
       ctx.publish(CHANNEL, payload)
       return payload
     })()
@@ -73,32 +72,28 @@ module.exports = (ctx) => {
     refresh().catch((error) => ctx.log('poll failed: ' + (error && error.message)))
   }, POLL_INTERVAL_MS)
 
-  const unsubscribeSettings = ctx.settings.onChange((key) => {
-    if (Object.values(PROVIDER_SETTING_KEYS).includes(key)) {
-      refresh().catch((error) => ctx.log('settings refresh failed: ' + (error && error.message)))
-    }
-  })
-
   ctx.onCommand(async (name, payload) => {
     if (name === 'refresh') {
       return refresh()
     }
-    if (name === 'opencode-key-status') {
-      const resolved = resolveOpencodeKey({ dataDir: ctx.dataDir })
-      return { configured: Boolean(resolved.key), source: resolved.source }
+    if (name === 'provider-status') {
+      return providerStatus()
+    }
+    if (name === 'set-provider-enabled') {
+      setProviderEnabled(ctx.dataDir, payload && payload.id, payload && payload.enabled)
+      await refresh()
+      return providerStatus()
     }
     if (name === 'set-opencode-key') {
       const apiKey = payload && typeof payload.apiKey === 'string' ? payload.apiKey : ''
-      const saved = saveOpencodeKey(ctx.dataDir, apiKey)
+      saveOpencodeKey(ctx.dataDir, apiKey)
       await refresh()
-      const resolved = resolveOpencodeKey({ dataDir: ctx.dataDir })
-      return { ...saved, configured: Boolean(resolved.key), source: resolved.source }
+      return providerStatus()
     }
     throw new Error('unknown command: ' + name)
   })
 
   return () => {
     clearInterval(timer)
-    unsubscribeSettings()
   }
 }

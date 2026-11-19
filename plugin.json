@@ -1,9 +1,9 @@
 {
   "id": "alpine-shell.ai-usage",
   "name": "AI Usage",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "apiVersion": 1,
-  "description": "Claude, Gemini, and OpenCode Go usage limits, live in your topbar.",
+  "description": "Claude, Antigravity, and OpenCode usage limits, live in your topbar.",
   "author": {
     "name": "Alpine Shell"
   },
@@ -20,24 +20,6 @@
     ],
     "settings": [
       {
-        "key": "claudeEnabled",
-        "type": "toggle",
-        "label": "Claude",
-        "default": true
-      },
-      {
-        "key": "geminiEnabled",
-        "type": "toggle",
-        "label": "Gemini",
-        "default": true
-      },
-      {
-        "key": "opencodeEnabled",
-        "type": "toggle",
-        "label": "OpenCode Go",
-        "default": true
-      },
-      {
         "key": "pillIcon",
         "type": "select",
         "label": "Topbar icon",
@@ -45,7 +27,7 @@
         "options": [
           { "value": "clawd", "label": "Clawd" },
           { "value": "claude", "label": "Claude" },
-          { "value": "gemini", "label": "Gemini" },
+          { "value": "antigravity", "label": "Antigravity" },
           { "value": "opencode", "label": "OpenCode" },
           { "value": "auto", "label": "Active provider" },
           { "value": "none", "label": "None" }
@@ -59,8 +41,8 @@
         "options": [
           { "value": "highest", "label": "Highest usage" },
           { "value": "claude", "label": "Claude" },
-          { "value": "gemini", "label": "Gemini" },
-          { "value": "opencode", "label": "OpenCode Go" }
+          { "value": "antigravity", "label": "Antigravity" },
+          { "value": "opencode", "label": "OpenCode" }
         ]
       }
     ],
@@ -72,9 +54,9 @@
     ]
   },
   "marketplace": {
-    "shortDescription": "Claude, Gemini, and OpenCode Go limits, live in your topbar.",
+    "shortDescription": "Claude, Antigravity, and OpenCode limits, live in your topbar.",
     "readme": "README.md",
     "category": "developer",
-    "keywords": ["ai", "usage", "claude", "gemini", "opencode", "limits", "topbar"]
+    "keywords": ["ai", "usage", "claude", "antigravity", "gemini", "opencode", "limits", "topbar"]
   }
 }
