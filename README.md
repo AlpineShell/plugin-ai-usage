@@ -19,4 +19,4 @@ Turn each provider on or off in the **Providers** list in **Settings** > **AI Us
 Customize the pill in **Settings** > **AI Usage**:
 
 - **Topbar icon**: Clawd, Claude, Antigravity, OpenCode, Active provider, or None.
-- **Topbar bar**: show the highest usage across enabled providers, or pin the bar to one provider.
+- **Topbar bar**: by default every provider shares one bar, with each provider's used part side by side from the left, the most used first, and each part turning amber, then red, as that provider nears its limit. You can also show only the highest usage, or pin the bar to one provider.

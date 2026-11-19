@@ -43,10 +43,81 @@ const SWEEP_KEYFRAMES =
   (BAR_WIDTH + 4) +
   'px)}}'
 
+const SEGMENT_GAP = 3
+
 function fillColor(pct, dark) {
   if (pct >= DANGER_PCT) return 'rgba(239,68,68,0.95)'
   if (pct >= WARN_PCT) return 'rgba(245,158,11,0.95)'
   return dark ? 'rgba(0,0,0,0.82)' : 'rgba(255,255,255,0.92)'
+}
+
+function byUsageDescending(segments) {
+  return [...segments].sort((a, b) => b.barPercent - a.barPercent || PROVIDER_ORDER.indexOf(a.id) - PROVIDER_ORDER.indexOf(b.id))
+}
+
+function barSegments(providers, enabledIds) {
+  return enabledIds.map((id) => providers && providers[id]).filter((entry) => entry && entry.status === 'ok')
+}
+
+function BarFill({ percent, color }) {
+  const ratio = Math.max(0, Math.min(1, percent / 100))
+  return html`
+    <div
+      style=${{
+        width: ratio * 100 + '%',
+        height: '100%',
+        borderRadius: '999px',
+        background: color,
+        transition: 'width 400ms ease, background 300ms ease',
+      }}
+    />
+  `
+}
+
+function stackedFillWidths(segments) {
+  const share = (BAR_WIDTH - SEGMENT_GAP * (segments.length - 1)) / segments.length
+  return segments.map((entry) => (share * Math.max(0, Math.min(100, entry.barPercent))) / 100)
+}
+
+const MIN_VISIBLE_PIECE_PX = 0.5
+const MIN_FILL_PX = BAR_HEIGHT + 1
+
+function stackedPieces(segments) {
+  const widths = stackedFillWidths(segments)
+  const fills = segments
+    .map((entry, index) => ({
+      key: entry.id,
+      percent: entry.barPercent,
+      width: Math.max(MIN_FILL_PX, widths[index]),
+    }))
+    .filter((piece) => piece.percent > 0)
+  const usedWidth = fills.reduce((sum, piece) => sum + piece.width, 0) + SEGMENT_GAP * Math.max(0, fills.length - 1)
+  const freeWidth = BAR_WIDTH - usedWidth - (fills.length > 0 ? SEGMENT_GAP : 0)
+  return { fills, freeWidth: freeWidth >= MIN_VISIBLE_PIECE_PX ? freeWidth : 0 }
+}
+
+function StackedBar({ segments, dark }) {
+  const base = dark ? '0,0,0' : '255,255,255'
+  const { fills, freeWidth } = stackedPieces(byUsageDescending(segments))
+  const piece = (width, background, marginLeft) => ({
+    flex: '0 0 auto',
+    width: width + 'px',
+    marginLeft: marginLeft + 'px',
+    height: '100%',
+    borderRadius: '999px',
+    background,
+    transition: 'width 400ms ease, margin-left 400ms ease, background 300ms ease',
+  })
+  return html`
+    <div style=${{ display: 'flex', width: BAR_WIDTH + 'px', height: BAR_HEIGHT + 'px' }}>
+      ${fills.map(
+        (fill, index) =>
+          html`<div key=${fill.key} style=${piece(fill.width, fillColor(fill.percent, dark), index > 0 ? SEGMENT_GAP : 0)} />`,
+      )}
+      ${freeWidth > 0 &&
+      html`<div key="free" style=${piece(freeWidth, `rgba(${base},${dark ? 0.14 : 0.18})`, fills.length > 0 ? SEGMENT_GAP : 0)} />`}
+    </div>
+  `
 }
 
 function formatDuration(totalMinutes) {
@@ -153,6 +224,7 @@ function statusLabel(providerId, entry) {
   if (entry.status === 'expired') return PROVIDER_META[providerId].expiredHint || 'Authentication expired'
   if (entry.status === 'auth_error') return 'Authentication expired'
   if (entry.status === 'no_subscription') return 'Pay as you go, no limits to show'
+  if (entry.status === 'rate_limited') return 'Too many checks, trying again in a few minutes'
   if (entry.status === 'error') return 'Unable to reach service'
   return null
 }
@@ -265,12 +337,14 @@ export default function UsagePill() {
 
   const enabledIds = enabledProviderIds(snapshot && snapshot.enabled)
   const providers = snapshot && snapshot.providers ? snapshot.providers : null
-  const primary = selectPrimary(providers, enabledIds, barSource || 'highest')
+  const showAll = !barSource || barSource === 'all'
+  const primary = selectPrimary(providers, enabledIds, showAll ? 'highest' : barSource)
+  const segments = showAll ? barSegments(providers, enabledIds) : []
+  const splitBar = segments.length > 1
 
   const base = dark ? '0,0,0' : '255,255,255'
   const waitingForInitial = enabledIds.length > 0 && !providers
   const pct = primary ? primary.barPercent : 0
-  const ratio = Math.max(0, Math.min(1, pct / 100))
 
   const resolvedIconKind =
     pillIcon === 'auto'
@@ -279,7 +353,7 @@ export default function UsagePill() {
         : enabledIds.length > 0
           ? PROVIDER_META[enabledIds[0]].defaultIcon
           : 'clawd'
-      : pillIcon || 'clawd'
+      : pillIcon || 'none'
 
   const showIcon = resolvedIconKind !== 'none'
 
@@ -297,17 +371,7 @@ export default function UsagePill() {
           <style>${SWEEP_KEYFRAMES}</style>
         </div>
       `
-    : html`
-        <div
-          style=${{
-            width: ratio * 100 + '%',
-            height: '100%',
-            borderRadius: '999px',
-            background: fillColor(pct, dark),
-            transition: 'width 400ms ease, background 300ms ease',
-          }}
-        />
-      `
+    : html`<${BarFill} percent=${pct} color=${fillColor(pct, dark)} />`
 
   const trigger = html`
     <div style=${{ display: 'flex', alignItems: 'center', height: '100%', padding: '0 2px' }}>
@@ -325,17 +389,21 @@ export default function UsagePill() {
         }}
       >
         ${showIcon && html`<${ProviderIcon} kind=${resolvedIconKind} size=${12} dark=${dark} />`}
-        <div
-          style=${{
-            width: BAR_WIDTH + 'px',
-            height: BAR_HEIGHT + 'px',
-            borderRadius: '999px',
-            background: `rgba(${base},${dark ? 0.14 : 0.18})`,
-            overflow: 'hidden',
-          }}
-        >
-          ${fill}
-        </div>
+        ${splitBar && !waitingForInitial
+          ? html`<${StackedBar} segments=${segments} dark=${dark} />`
+          : html`
+              <div
+                style=${{
+                  width: BAR_WIDTH + 'px',
+                  height: BAR_HEIGHT + 'px',
+                  borderRadius: '999px',
+                  background: `rgba(${base},${dark ? 0.14 : 0.18})`,
+                  overflow: 'hidden',
+                }}
+              >
+                ${fill}
+              </div>
+            `}
       </div>
     </div>
   `
@@ -435,6 +503,7 @@ function providerSummary(providerId, enabled, entry, opencodeKey) {
   if (entry.status === 'expired') return 'Sign-in expired'
   if (entry.status === 'auth_error') return 'Key or sign-in refused'
   if (entry.status === 'no_subscription') return 'Zen · pay as you go'
+  if (entry.status === 'rate_limited') return 'Rate limited, retrying soon'
   return 'Unavailable'
 }
 

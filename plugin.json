@@ -1,7 +1,7 @@
 {
   "id": "alpine-shell.ai-usage",
   "name": "AI Usage",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "apiVersion": 1,
   "description": "Claude, Antigravity, and OpenCode usage limits, live in your topbar.",
   "author": {
@@ -23,7 +23,7 @@
         "key": "pillIcon",
         "type": "select",
         "label": "Topbar icon",
-        "default": "clawd",
+        "default": "none",
         "options": [
           { "value": "clawd", "label": "Clawd" },
           { "value": "claude", "label": "Claude" },
@@ -37,8 +37,9 @@
         "key": "barSource",
         "type": "select",
         "label": "Topbar bar",
-        "default": "highest",
+        "default": "all",
         "options": [
+          { "value": "all", "label": "All providers" },
           { "value": "highest", "label": "Highest usage" },
           { "value": "claude", "label": "Claude" },
           { "value": "antigravity", "label": "Antigravity" },

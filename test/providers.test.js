@@ -7,6 +7,7 @@ const {
   resetMs,
   fetchJson,
   claudePlanName,
+  fetchClaudeUsage,
   parseClaudeUsage,
   parseOpencodeUsage,
   resolveOpencodeKey,
@@ -21,6 +22,7 @@ const {
   tokenFromCredential,
 } = require('../lib/antigravity')
 const { readEnabledProviders, setProviderEnabled } = require('../lib/providerPrefs')
+const { createFetchSchedule, nextBackoffMs, RATE_LIMIT_BASE_MS, RATE_LIMIT_MAX_MS } = require('../lib/fetchSchedule')
 const startBackend = require('../backend')
 
 describe('plugin manifest', () => {
@@ -328,6 +330,50 @@ describe('selectPrimaryProvider', () => {
   test('pins to chosen provider and falls back to highest when chosen is unavailable', () => {
     expect(selectPrimaryProvider(providers, ['claude', 'antigravity'], 'claude').id).toBe('claude')
     expect(selectPrimaryProvider(providers, ['claude', 'antigravity', 'opencode'], 'opencode').id).toBe('antigravity')
+  })
+})
+
+describe('Claude rate limits', () => {
+  test('reports a 429 as rate limited with the wait Anthropic asks for', async () => {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-usage-claude-'))
+    try {
+      fs.mkdirSync(path.join(tmpHome, '.claude'), { recursive: true })
+      fs.writeFileSync(
+        path.join(tmpHome, '.claude', '.credentials.json'),
+        JSON.stringify({ claudeAiOauth: { accessToken: 'sk-ant-oat-test', subscriptionType: 'max' } }),
+      )
+      const fakeFetch = async () => ({
+        ok: false,
+        status: 429,
+        headers: { get: (name) => (name === 'retry-after' ? '600' : null) },
+        text: async () => '{"error":{"type":"rate_limit_error"}}',
+      })
+      const result = await fetchClaudeUsage({ env: {}, homedir: tmpHome, fetchImpl: fakeFetch })
+      expect(result.status).toBe('rate_limited')
+      expect(result.retryAfterMs).toBe(600000)
+    } finally {
+      fs.rmSync(tmpHome, { recursive: true, force: true })
+    }
+  })
+
+  test('asks Claude every five minutes and backs off further after each refusal', () => {
+    let clock = 0
+    const schedule = createFetchSchedule(() => clock)
+    expect(schedule.isDue('claude')).toBe(true)
+    schedule.record('claude', { status: 'ok' })
+    clock = 60000
+    expect(schedule.isDue('claude')).toBe(false)
+    clock = 300000
+    expect(schedule.isDue('claude')).toBe(true)
+    schedule.record('claude', { status: 'rate_limited', retryAfterMs: null })
+    clock += RATE_LIMIT_BASE_MS - 60000
+    expect(schedule.isDue('claude')).toBe(false)
+    expect(nextBackoffMs(RATE_LIMIT_BASE_MS, null)).toBe(RATE_LIMIT_BASE_MS * 2)
+    expect(nextBackoffMs(RATE_LIMIT_MAX_MS, null)).toBe(RATE_LIMIT_MAX_MS)
+    expect(nextBackoffMs(0, RATE_LIMIT_MAX_MS * 2)).toBe(RATE_LIMIT_MAX_MS * 2)
+    schedule.record('antigravity', { status: 'ok' })
+    clock += 60000
+    expect(schedule.isDue('antigravity')).toBe(true)
   })
 })
 
