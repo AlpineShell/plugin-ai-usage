@@ -24,10 +24,10 @@ const PROVIDER_META = {
   antigravity: {
     label: 'Antigravity',
     emptyHint: 'Sign in with the Antigravity CLI',
-    expiredHint: 'Use Antigravity to refresh the sign-in',
+    expiredHint: 'Refresh sign-in in Settings',
     defaultIcon: 'antigravity',
   },
-  opencode: { label: 'OpenCode', emptyHint: 'Add an API key in Settings', defaultIcon: 'opencode' },
+  opencode: { label: 'OpenCode', emptyHint: 'Add API key in Settings', defaultIcon: 'opencode' },
 }
 
 const PROVIDER_ORDER = ['claude', 'antigravity', 'opencode']
@@ -246,7 +246,7 @@ function statusLabel(providerId, entry) {
   if (entry.status === 'expired') return PROVIDER_META[providerId].expiredHint || 'Authentication expired'
   if (entry.status === 'auth_error') return 'Authentication expired'
   if (entry.status === 'no_subscription') return 'Pay as you go, no limits to show'
-  if (entry.status === 'rate_limited') return 'Too many checks, trying again in a few minutes'
+  if (entry.status === 'rate_limited') return 'Rate limited · retrying soon'
   if (entry.status === 'error') return 'Unable to reach service'
   return null
 }
@@ -332,7 +332,7 @@ function UsagePanel({ providers, enabledIds, dark }) {
   const base = dark ? '0,0,0' : '255,255,255'
   if (enabledIds.length === 0) {
     return html`
-      <div style=${{ padding: '12px 14px', minWidth: '200px', fontSize: '12px', color: `rgba(${base},0.65)` }}>
+      <div style=${{ width: '240px', boxSizing: 'border-box', padding: '12px 14px 14px', fontSize: '12px', color: `rgba(${base},0.65)` }}>
         Enable a provider in Settings
       </div>
     `
@@ -340,7 +340,7 @@ function UsagePanel({ providers, enabledIds, dark }) {
   const showHeader = enabledIds.length > 1 || enabledIds[0] !== 'claude' || Boolean(providers && providers.claude && providers.claude.status !== 'ok')
 
   return html`
-    <div style=${{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '12px', minWidth: '216px' }}>
+    <div style=${{ width: '240px', boxSizing: 'border-box', padding: '12px 14px 14px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
       ${enabledIds.map(
         (id, index) => html`
           <div key=${id} style=${{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
