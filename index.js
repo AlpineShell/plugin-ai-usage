@@ -136,11 +136,33 @@ function formatResetClock(ms) {
   return at.toLocaleDateString([], { weekday: 'short' }) + ' ' + time
 }
 
-function formatReset(ms) {
+function formatReset(ms, stale = false) {
   if (!ms) return null
   const delta = ms - Date.now()
-  if (delta <= 0) return 'resetting'
+  if (delta <= 0) return stale ? 'reset passed' : 'resetting'
   return `resets in ${formatDuration(Math.ceil(delta / 60000))} · ${formatResetClock(ms)}`
+}
+
+function formatAge(updatedAtMs) {
+  if (!updatedAtMs) return null
+  const mins = Math.floor((Date.now() - updatedAtMs) / 60000)
+  if (mins < 1) return 'just now'
+  return `${formatDuration(mins)} ago`
+}
+
+function staleReasonLabel(reason) {
+  if (reason === 'rate_limited') return 'rate limited'
+  if (reason === 'expired') return 'sign-in expired'
+  if (reason === 'error') return 'offline'
+  return null
+}
+
+function staleFooter(entry) {
+  if (!entry || !entry.stale) return null
+  const age = formatAge(entry.updatedAtMs)
+  const reason = staleReasonLabel(entry.staleReason)
+  const parts = [age ? `cached ${age}` : 'cached', reason].filter(Boolean)
+  return parts.join(' · ')
 }
 
 function ClawdIcon({ size = 12 }) {
@@ -229,11 +251,11 @@ function statusLabel(providerId, entry) {
   return null
 }
 
-function LimitRow({ limit, dark }) {
+function LimitRow({ limit, dark, stale }) {
   const base = dark ? '0,0,0' : '255,255,255'
   const ratio = Math.max(0, Math.min(1, limit.percent / 100))
   const idle = limit.active === false
-  const reset = idle ? null : formatReset(limit.resetsAtMs)
+  const reset = idle ? null : formatReset(limit.resetsAtMs, stale)
   const footerParts = []
   if (limit.detail) footerParts.push(limit.detail)
   if (idle && limit.kind === 'session') footerParts.push('session not started')
@@ -261,6 +283,7 @@ function ProviderSection({ providerId, entry, dark, showHeader }) {
   const meta = PROVIDER_META[providerId]
   const message = statusLabel(providerId, entry)
   const rows = entry && entry.status === 'ok' && Array.isArray(entry.limits) ? entry.limits : []
+  const cachedNote = entry && entry.status === 'ok' ? staleFooter(entry) : null
 
   return html`
     <div style=${{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -296,10 +319,11 @@ function ProviderSection({ providerId, entry, dark, showHeader }) {
         : rows.length > 0
           ? html`
               <div style=${{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                ${rows.map((limit) => html`<${LimitRow} key=${limit.key || limit.label} limit=${limit} dark=${dark} />`)}
+                ${rows.map((limit) => html`<${LimitRow} key=${limit.key || limit.label} limit=${limit} dark=${dark} stale=${Boolean(entry.stale)} />`)}
               </div>
             `
           : html`<span style=${{ fontSize: '11px', color: `rgba(${base},0.5)` }}>No active limits</span>`}
+      ${cachedNote && html`<span style=${{ fontSize: '10px', color: `rgba(${base},0.42)` }}>${cachedNote}</span>`}
     </div>
   `
 }
@@ -498,7 +522,12 @@ function providerSummary(providerId, enabled, entry, opencodeKey) {
   if (!enabled) return 'Off'
   if (providerId === 'opencode' && !opencodeKey.configured) return 'No API key'
   if (!entry) return 'Checking'
-  if (entry.status === 'ok') return entry.plan || 'Connected'
+  if (entry.status === 'ok') {
+    const label = entry.plan || 'Connected'
+    if (!entry.stale) return label
+    const reason = staleReasonLabel(entry.staleReason)
+    return reason ? `${label} · cached (${reason})` : `${label} · cached`
+  }
   if (entry.status === 'no_credentials') return 'Not signed in'
   if (entry.status === 'expired') return 'Sign-in expired'
   if (entry.status === 'auth_error') return 'Key or sign-in refused'
@@ -545,10 +574,30 @@ function OpencodeKeyEditor({ opencodeKey, busy, onSave, onCancel }) {
   `
 }
 
-function ProviderRow({ providerId, enabled, entry, opencodeKey, dark, editingKey, onToggle, onEditKey }) {
+function antigravitySignInAction(entry) {
+  if (!entry) return null
+  if (entry.status === 'no_credentials') return 'Sign in'
+  if (entry.status === 'expired' || entry.status === 'auth_error') return 'Refresh sign-in'
+  if (entry.status === 'ok' && entry.stale && entry.staleReason === 'expired') return 'Refresh sign-in'
+  return null
+}
+
+function ProviderRow({
+  providerId,
+  enabled,
+  entry,
+  opencodeKey,
+  dark,
+  editingKey,
+  busy,
+  onToggle,
+  onEditKey,
+  onRefreshAntigravity,
+}) {
   const meta = PROVIDER_META[providerId]
   const isOpencode = providerId === 'opencode'
   const showKeyAction = isOpencode && enabled && !editingKey
+  const antigravityAction = providerId === 'antigravity' && enabled ? antigravitySignInAction(entry) : null
 
   return html`
     <div className=${SETTINGS_ROW}>
@@ -560,6 +609,8 @@ function ProviderRow({ providerId, enabled, entry, opencodeKey, dark, editingKey
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-2">
+        ${antigravityAction &&
+        html`<${SettingsButton} variant="soft" disabled=${busy} onClick=${onRefreshAntigravity}>${antigravityAction}<//>`}
         ${showKeyAction &&
         (opencodeKey.configured
           ? html`<${CogButton} label="Change API key" onClick=${onEditKey} />`
@@ -626,8 +677,10 @@ export function SettingsPage() {
                 opencodeKey=${status.opencodeKey}
                 dark=${dark}
                 editingKey=${editingKey}
+                busy=${busy}
                 onToggle=${handleToggle}
                 onEditKey=${() => setEditingKey(true)}
+                onRefreshAntigravity=${() => runCommand('refresh-antigravity-signin')}
               />
               ${id === 'opencode' &&
               editingKey &&

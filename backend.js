@@ -5,26 +5,38 @@ const {
   resolveOpencodeKey,
   saveOpencodeKey,
 } = require('./lib/providers')
+const { launchAntigravityLogin } = require('./lib/antigravity')
 const { PROVIDER_IDS, readEnabledProviders, setProviderEnabled } = require('./lib/providerPrefs')
 const { createFetchSchedule } = require('./lib/fetchSchedule')
+const { readCachedUsage, writeCachedUsage } = require('./lib/usageCache')
 
 const CHANNEL = 'alpine-shell.ai-usage/usage'
 const POLL_INTERVAL_MS = 60000
-const PROVIDER_FETCHERS = {
+const DEFAULT_FETCHERS = {
   claude: fetchClaudeUsage,
   antigravity: fetchAntigravityUsage,
   opencode: fetchOpencodeUsage,
 }
 const STALE_FALLBACK_STATUSES = new Set(['error', 'expired', 'rate_limited'])
 
-module.exports = (ctx) => {
-  const lastOk = {}
+function startBackend(
+  ctx,
+  { fetchers = DEFAULT_FETCHERS, pollIntervalMs = POLL_INTERVAL_MS, launchLogin = launchAntigravityLogin } = {},
+) {
+  const lastOk = readCachedUsage(ctx.dataDir)
   const latest = {}
   const schedule = createFetchSchedule()
   let activeRefresh = null
 
+  function persistCache() {
+    writeCachedUsage(ctx.dataDir, lastOk)
+  }
+
   function forget(providerId) {
-    delete lastOk[providerId]
+    if (lastOk[providerId]) {
+      delete lastOk[providerId]
+      persistCache()
+    }
     delete latest[providerId]
     schedule.reset(providerId)
   }
@@ -32,18 +44,25 @@ module.exports = (ctx) => {
   function shownResult(providerId, result) {
     if (result.status === 'ok') {
       lastOk[providerId] = result
+      persistCache()
       return result
     }
     if (STALE_FALLBACK_STATUSES.has(result.status) && lastOk[providerId]) {
-      return { ...lastOk[providerId], stale: true }
+      return { ...lastOk[providerId], stale: true, staleReason: result.status }
     }
-    delete lastOk[providerId]
+    if (lastOk[providerId]) {
+      delete lastOk[providerId]
+      persistCache()
+    }
     return result
   }
 
-  async function currentResult(providerId) {
-    if (latest[providerId] && !schedule.isDue(providerId)) return latest[providerId]
-    const result = await PROVIDER_FETCHERS[providerId]({ dataDir: ctx.dataDir })
+  async function currentResult(providerId, options = {}) {
+    if (!options.force && latest[providerId] && !schedule.isDue(providerId)) return latest[providerId]
+    const result = await fetchers[providerId]({
+      dataDir: ctx.dataDir,
+      forceCredentialRead: Boolean(options.forceCredentialRead),
+    })
     schedule.record(providerId, result)
     latest[providerId] = shownResult(providerId, result)
     return latest[providerId]
@@ -57,9 +76,22 @@ module.exports = (ctx) => {
     }
   }
 
-  async function refresh() {
-    if (activeRefresh) return activeRefresh
-    activeRefresh = (async () => {
+  function publishInitialCache() {
+    const enabled = readEnabledProviders(ctx.dataDir)
+    const providers = {}
+    for (const id of PROVIDER_IDS) {
+      if (enabled[id] && lastOk[id]) {
+        providers[id] = { ...lastOk[id], stale: true, staleReason: 'cached' }
+      }
+    }
+    if (Object.keys(providers).length > 0) {
+      ctx.publish(CHANNEL, { providers, enabled, updatedAtMs: Date.now() })
+    }
+  }
+
+  async function refresh({ forceProvider = null } = {}) {
+    if (activeRefresh && !forceProvider) return activeRefresh
+    const run = (async () => {
       const enabled = readEnabledProviders(ctx.dataDir)
       const providers = {}
       const enabledIds = PROVIDER_IDS.filter((id) => enabled[id])
@@ -70,7 +102,8 @@ module.exports = (ctx) => {
 
       await Promise.all(
         enabledIds.map(async (id) => {
-          providers[id] = await currentResult(id)
+          const force = forceProvider === id
+          providers[id] = await currentResult(id, { force, forceCredentialRead: force })
         }),
       )
 
@@ -78,17 +111,19 @@ module.exports = (ctx) => {
       ctx.publish(CHANNEL, payload)
       return payload
     })()
+    activeRefresh = run
     try {
-      return await activeRefresh
+      return await run
     } finally {
-      activeRefresh = null
+      if (activeRefresh === run) activeRefresh = null
     }
   }
 
+  publishInitialCache()
   refresh().catch((error) => ctx.log('initial refresh failed: ' + (error && error.message)))
   const timer = setInterval(() => {
     refresh().catch((error) => ctx.log('poll failed: ' + (error && error.message)))
-  }, POLL_INTERVAL_MS)
+  }, pollIntervalMs)
 
   ctx.onCommand(async (name, payload) => {
     if (name === 'refresh') {
@@ -110,6 +145,18 @@ module.exports = (ctx) => {
       await refresh()
       return providerStatus()
     }
+    if (name === 'refresh-antigravity-signin') {
+      launchLogin({
+        onExit: () => {
+          delete latest.antigravity
+          schedule.reset('antigravity')
+          refresh({ forceProvider: 'antigravity' }).catch((error) =>
+            ctx.log('post-login refresh failed: ' + (error && error.message)),
+          )
+        },
+      })
+      return providerStatus()
+    }
     throw new Error('unknown command: ' + name)
   })
 
@@ -117,3 +164,6 @@ module.exports = (ctx) => {
     clearInterval(timer)
   }
 }
+
+startBackend.startBackend = startBackend
+module.exports = startBackend

@@ -17,12 +17,16 @@ const {
 } = require('../lib/providers')
 const {
   createAntigravityFetcher,
+  findAgyExecutable,
+  launchAntigravityLogin,
   parseAntigravityModels,
   parseCredentialBlob,
+  readAntigravityFileToken,
   tokenFromCredential,
 } = require('../lib/antigravity')
 const { readEnabledProviders, setProviderEnabled } = require('../lib/providerPrefs')
 const { createFetchSchedule, nextBackoffMs, RATE_LIMIT_BASE_MS, RATE_LIMIT_MAX_MS } = require('../lib/fetchSchedule')
+const { readCachedUsage, writeCachedUsage } = require('../lib/usageCache')
 const startBackend = require('../backend')
 
 describe('plugin manifest', () => {
@@ -173,16 +177,112 @@ describe('Antigravity usage parser and fetcher', () => {
       fetched = true
       return { ok: true, status: 200, text: async () => '{}' }
     }
-    const missing = createAntigravityFetcher({ fetchJson, clampPercent, resetMs, readCredential: async () => null })
+    const missing = createAntigravityFetcher({
+      fetchJson,
+      clampPercent,
+      resetMs,
+      readCredential: async () => null,
+      readFileToken: () => null,
+    })
     expect((await missing({ fetchImpl: fakeFetch })).status).toBe('no_credentials')
     const expired = createAntigravityFetcher({
       fetchJson,
       clampPercent,
       resetMs,
       readCredential: async () => ({ token: { access_token: 'ya29.old', expiry: new Date(Date.now() - 1000).toISOString() } }),
+      readFileToken: () => null,
     })
     expect((await expired({ fetchImpl: fakeFetch })).status).toBe('expired')
     expect(fetched).toBe(false)
+  })
+
+  test('picks up a fresh T3 Code antigravity-oauth-token file without calling Windows Credential Manager', async () => {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-usage-t3-ag-'))
+    try {
+      const acpDir = path.join(tmpHome, '.t3', 'userdata', 'providers', 'antigravity', 'profile1', 'antigravity-acp')
+      fs.mkdirSync(path.join(acpDir, 'cache'), { recursive: true })
+      fs.writeFileSync(
+        path.join(acpDir, 'antigravity-oauth-token'),
+        JSON.stringify({ token: { access_token: 'ya29.t3-fresh', expiry: new Date(Date.now() + 3600000).toISOString() } }),
+      )
+      fs.writeFileSync(path.join(acpDir, 'cache', 'default_project_id.txt'), 't3-project-42\n')
+
+      expect(readAntigravityFileToken(tmpHome).accessToken).toBe('ya29.t3-fresh')
+
+      let credReads = 0
+      let seenAuth = null
+      let seenBody = null
+      const fetchUsage = createAntigravityFetcher({
+        fetchJson,
+        clampPercent,
+        resetMs,
+        homedir: tmpHome,
+        readCredential: async () => {
+          credReads += 1
+          return { token: { access_token: 'ya29.expired', expiry: new Date(Date.now() - 3600000).toISOString() } }
+        },
+      })
+      const result = await fetchUsage({
+        fetchImpl: async (url, opts) => {
+          seenAuth = opts.headers.Authorization
+          if (url.includes('fetchAvailableModels')) seenBody = JSON.parse(opts.body)
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              url.includes('loadCodeAssist')
+                ? JSON.stringify({ paidTier: { name: 'Google AI Pro' } })
+                : JSON.stringify({ models: { flash: { modelProvider: 'MODEL_PROVIDER_GOOGLE', quotaInfo: { remainingFraction: 0.8, resetTime: '2026-11-20T22:00:00Z' } } } }),
+          }
+        },
+      })
+      expect(result.status).toBe('ok')
+      expect(result.plan).toBe('Google AI Pro')
+      expect(result.barPercent).toBeCloseTo(20, 5)
+      expect(seenAuth).toBe('Bearer ya29.t3-fresh')
+      expect(seenBody).toEqual({ project: 't3-project-42' })
+      expect(credReads).toBe(0)
+    } finally {
+      fs.rmSync(tmpHome, { recursive: true, force: true })
+    }
+  })
+
+  test('reads the sign-in again as soon as Antigravity has been used', async () => {
+    let clock = Date.parse('2026-11-19T15:23:00Z')
+    let activityMs = clock - 3600000
+    let credentialReads = 0
+    let expiry = clock - 60000
+    const readCredential = async () => {
+      credentialReads += 1
+      return { token: { access_token: 'ya29.current', expiry: new Date(expiry).toISOString() } }
+    }
+    const fakeFetch = async (url) => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        url.includes('loadCodeAssist')
+          ? '{}'
+          : JSON.stringify({ models: { flash: { modelProvider: 'MODEL_PROVIDER_GOOGLE', quotaInfo: { remainingFraction: 0.5, resetTime: '2026-11-19T18:00:00Z' } } } }),
+    })
+    const fetchUsage = createAntigravityFetcher({
+      fetchJson,
+      clampPercent,
+      resetMs,
+      readCredential,
+      homedir: os.tmpdir(),
+      now: () => clock,
+      readActivityMs: () => activityMs,
+      readFileToken: () => null,
+    })
+    expect((await fetchUsage({ fetchImpl: fakeFetch })).status).toBe('expired')
+    clock += 60000
+    expect((await fetchUsage({ fetchImpl: fakeFetch })).status).toBe('expired')
+    expect(credentialReads).toBe(1)
+    expiry = clock + 3600000
+    activityMs = clock + 1000
+    clock += 60000
+    expect((await fetchUsage({ fetchImpl: fakeFetch })).status).toBe('ok')
+    expect(credentialReads).toBe(2)
   })
 
   test('decodes the credential blob Windows hands back', () => {
@@ -192,6 +292,97 @@ describe('Antigravity usage parser and fetcher', () => {
     expect(token.expiresAtMs).toBe(Date.parse('2026-11-19T14:18:14+01:00'))
     expect(parseCredentialBlob('')).toBeNull()
     expect(tokenFromCredential({})).toBeNull()
+  })
+
+  test('launches agy acp --login and refreshes Antigravity immediately on exit', async () => {
+    const tmpData = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-usage-login-'))
+    setProviderEnabled(tmpData, 'claude', false)
+    setProviderEnabled(tmpData, 'opencode', false)
+    try {
+      expect(findAgyExecutable({ env: { LOCALAPPDATA: 'C:\\Local' }, existsSync: (p) => p.endsWith('agy.exe') })).toBe(
+        path.join('C:\\Local', 'agy', 'bin', 'agy.exe'),
+      )
+      expect(findAgyExecutable({ env: {}, existsSync: () => false })).toBe('agy')
+
+      let spawnedArgs = null
+      let exitCallback = null
+      const launched = launchAntigravityLogin({
+        env: {},
+        existsSync: () => false,
+        spawnImpl: (exe, args, opts) => {
+          spawnedArgs = { exe, args, opts }
+          return {
+            once: (event, fn) => {
+              if (event === 'exit') exitCallback = fn
+            },
+            unref: () => {},
+          }
+        },
+        onExit: () => {
+          spawnedArgs.exited = true
+        },
+      })
+      expect(launched.launched).toBe(true)
+      expect(spawnedArgs.exe).toBe('agy')
+      expect(spawnedArgs.args).toEqual(['acp', '--login'])
+      exitCallback()
+      expect(spawnedArgs.exited).toBe(true)
+
+      const published = []
+      let commandHandler = null
+      let triggerLoginExit = null
+      let signedIn = false
+      let sawForceRead = false
+      const stop = startBackend(
+        {
+          id: 'alpine-shell.ai-usage',
+          dataDir: tmpData,
+          settings: { get: () => undefined, onChange: () => () => {} },
+          publish: (channel, data) => published.push({ channel, data }),
+          log: () => {},
+          onCommand: (fn) => {
+            commandHandler = fn
+          },
+        },
+        {
+          fetchers: {
+            claude: async () => ({ id: 'claude', status: 'no_credentials', plan: null, barPercent: 0, limits: [] }),
+            antigravity: async (opts) => {
+              if (opts && opts.forceCredentialRead) sawForceRead = true
+              if (!signedIn) return { id: 'antigravity', status: 'expired', plan: 'Google AI Pro', barPercent: 0, limits: [] }
+              return {
+                id: 'antigravity',
+                status: 'ok',
+                plan: 'Google AI Pro',
+                barPercent: 15,
+                limits: [{ key: 'gemini', kind: 'pool', label: 'Gemini', percent: 15, resetsAtMs: null, active: true }],
+                updatedAtMs: Date.now(),
+              }
+            },
+            opencode: async () => ({ id: 'opencode', status: 'no_credentials', plan: null, barPercent: 0, limits: [] }),
+          },
+          launchLogin: ({ onExit }) => {
+            triggerLoginExit = onExit
+            return { launched: true }
+          },
+        },
+      )
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        expect(published[published.length - 1].data.providers.antigravity.status).toBe('expired')
+        await commandHandler('refresh-antigravity-signin')
+        expect(typeof triggerLoginExit).toBe('function')
+        signedIn = true
+        triggerLoginExit()
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        expect(sawForceRead).toBe(true)
+        expect(published[published.length - 1].data.providers.antigravity).toMatchObject({ status: 'ok', barPercent: 15 })
+      } finally {
+        stop()
+      }
+    } finally {
+      fs.rmSync(tmpData, { recursive: true, force: true })
+    }
   })
 })
 
@@ -421,6 +612,98 @@ describe('backend lifecycle', () => {
       expect(saved.opencodeKey).toEqual({ configured: true, source: 'settings' })
     } finally {
       stop()
+      fs.rmSync(tmpData, { recursive: true, force: true })
+    }
+  })
+
+  test('persists the last known usage across restarts when rate limited or expired', async () => {
+    const tmpData = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-usage-cache-'))
+    setProviderEnabled(tmpData, 'opencode', false)
+    const claudeOk = {
+      id: 'claude',
+      status: 'ok',
+      plan: 'Max 20x',
+      barKind: 'session',
+      barPercent: 48,
+      barResetsAtMs: Date.now() + 3600000,
+      limits: [{ key: 'session', kind: 'session', label: 'Session · 5h', percent: 48, resetsAtMs: Date.now() + 3600000, active: true }],
+      updatedAtMs: Date.now(),
+    }
+    const antigravityOk = {
+      id: 'antigravity',
+      status: 'ok',
+      plan: 'Google AI Pro',
+      barKind: 'quota',
+      barPercent: 24,
+      barResetsAtMs: Date.now() + 7200000,
+      limits: [{ key: 'gemini', kind: 'pool', label: 'Gemini', percent: 24, resetsAtMs: Date.now() + 7200000, active: true }],
+      updatedAtMs: Date.now(),
+    }
+    const makeCtx = (published) => ({
+      id: 'alpine-shell.ai-usage',
+      dataDir: tmpData,
+      settings: { get: () => undefined, onChange: () => () => {} },
+      publish: (channel, data) => published.push({ channel, data }),
+      log: () => {},
+      onCommand: () => {},
+    })
+    try {
+      const firstPublished = []
+      const stopFirst = startBackend(makeCtx(firstPublished), {
+        fetchers: {
+          claude: async () => claudeOk,
+          antigravity: async () => antigravityOk,
+          opencode: async () => ({ id: 'opencode', status: 'no_credentials', plan: null, barPercent: 0, limits: [] }),
+        },
+      })
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      stopFirst()
+
+      expect(Object.keys(readCachedUsage(tmpData)).sort()).toEqual(['antigravity', 'claude'])
+
+      const secondPublished = []
+      const stopSecond = startBackend(makeCtx(secondPublished), {
+        fetchers: {
+          claude: async () => ({ id: 'claude', status: 'rate_limited', retryAfterMs: 300000, plan: 'Max 20x', barPercent: 0, limits: [] }),
+          antigravity: async () => ({ id: 'antigravity', status: 'expired', plan: 'Google AI Pro', barPercent: 0, limits: [] }),
+          opencode: async () => ({ id: 'opencode', status: 'no_credentials', plan: null, barPercent: 0, limits: [] }),
+        },
+      })
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      stopSecond()
+
+      expect(secondPublished.length).toBeGreaterThanOrEqual(2)
+      const latest = secondPublished[secondPublished.length - 1].data.providers
+      expect(latest.claude).toMatchObject({ status: 'ok', barPercent: 48, stale: true, staleReason: 'rate_limited' })
+      expect(latest.antigravity).toMatchObject({ status: 'ok', barPercent: 24, stale: true, staleReason: 'expired' })
+
+      const thirdPublished = []
+      const stopThird = startBackend(makeCtx(thirdPublished), {
+        fetchers: {
+          claude: async () => ({ id: 'claude', status: 'no_credentials', plan: null, barPercent: 0, limits: [] }),
+          antigravity: async () => antigravityOk,
+          opencode: async () => ({ id: 'opencode', status: 'no_credentials', plan: null, barPercent: 0, limits: [] }),
+        },
+      })
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      stopThird()
+
+      expect(thirdPublished[thirdPublished.length - 1].data.providers.claude.status).toBe('no_credentials')
+      expect(readCachedUsage(tmpData).claude).toBeUndefined()
+    } finally {
+      fs.rmSync(tmpData, { recursive: true, force: true })
+    }
+  })
+
+  test('ignores malformed or non-ok entries in usageCache', () => {
+    const tmpData = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-usage-cache-unit-'))
+    try {
+      writeCachedUsage(tmpData, {
+        claude: { status: 'rate_limited', limits: [] },
+        antigravity: { status: 'ok', barPercent: 10, limits: [] },
+      })
+      expect(Object.keys(readCachedUsage(tmpData))).toEqual(['antigravity'])
+    } finally {
       fs.rmSync(tmpData, { recursive: true, force: true })
     }
   })
