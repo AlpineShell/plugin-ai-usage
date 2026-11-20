@@ -55,8 +55,21 @@ function byUsageDescending(segments) {
   return [...segments].sort((a, b) => b.barPercent - a.barPercent || PROVIDER_ORDER.indexOf(a.id) - PROVIDER_ORDER.indexOf(b.id))
 }
 
-function barSegments(providers, enabledIds) {
-  return enabledIds.map((id) => providers && providers[id]).filter((entry) => entry && entry.status === 'ok')
+function segmentsForProvider(entry) {
+  if (!entry || entry.status !== 'ok') return []
+  if (entry.id === 'antigravity' && Array.isArray(entry.limits) && entry.limits.length > 1) {
+    return entry.limits.map((limit) => ({
+      id: entry.id,
+      key: `${entry.id}:${limit.key || limit.label}`,
+      barPercent: limit.percent,
+    }))
+  }
+  return [{ id: entry.id, key: entry.id, barPercent: entry.barPercent }]
+}
+
+function barSegments(providers, enabledIds, barSource) {
+  const ids = !barSource || barSource === 'all' ? enabledIds : barSource === 'highest' ? [] : [barSource]
+  return ids.flatMap((id) => segmentsForProvider(providers && providers[id]))
 }
 
 function BarFill({ percent, color }) {
@@ -86,7 +99,7 @@ function stackedPieces(segments) {
   const widths = stackedFillWidths(segments)
   const fills = segments
     .map((entry, index) => ({
-      key: entry.id,
+      key: entry.key || entry.id,
       percent: entry.barPercent,
       width: Math.max(MIN_FILL_PX, widths[index]),
     }))
@@ -363,7 +376,7 @@ export default function UsagePill() {
   const providers = snapshot && snapshot.providers ? snapshot.providers : null
   const showAll = !barSource || barSource === 'all'
   const primary = selectPrimary(providers, enabledIds, showAll ? 'highest' : barSource)
-  const segments = showAll ? barSegments(providers, enabledIds) : []
+  const segments = barSegments(providers, enabledIds, barSource)
   const splitBar = segments.length > 1
 
   const base = dark ? '0,0,0' : '255,255,255'
