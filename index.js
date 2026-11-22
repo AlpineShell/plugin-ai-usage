@@ -549,6 +549,39 @@ function providerSummary(providerId, enabled, entry, opencodeKey) {
   return 'Unavailable'
 }
 
+function AntigravityLoginEditor({ authUrl, busy, error, onSubmit, onOpenLink, onCancel }) {
+  const [value, setValue] = useState('')
+  const canSubmit = !busy && value.trim().length > 0
+
+  return html`
+    <div className="flex flex-col gap-2 px-3.5 py-2.5">
+      <div
+        className="flex h-8 items-center gap-2 rounded-field border border-line-hairline bg-surface-2 px-3 transition-colors focus-within:border-line-strong"
+      >
+        <input
+          type="text"
+          autoFocus
+          value=${value}
+          aria-label="Antigravity authorization code"
+          placeholder="Paste code or redirect URL from browser"
+          onChange=${(event) => setValue(event.target.value)}
+          onKeyDown=${(event) => {
+            if (event.key === 'Enter' && canSubmit) onSubmit(value)
+            if (event.key === 'Escape') onCancel()
+          }}
+          className="w-full bg-transparent text-dense text-ink-primary outline-none placeholder:text-ink-faint"
+        />
+      </div>
+      ${error && html`<div className="text-xs text-danger">${error}</div>`}
+      <div className="flex items-center gap-2">
+        <${SettingsButton} variant="primary" disabled=${!canSubmit} onClick=${() => onSubmit(value)}>Confirm<//>
+        ${authUrl && html`<${SettingsButton} variant="soft" disabled=${busy} onClick=${onOpenLink}>Open link<//>`}
+        <${SettingsButton} variant="ghost" disabled=${busy} onClick=${onCancel}>Cancel<//>
+      </div>
+    </div>
+  `
+}
+
 function OpencodeKeyEditor({ opencodeKey, busy, onSave, onCancel }) {
   const [value, setValue] = useState('')
   const canSave = !busy && value.trim().length > 0
@@ -602,6 +635,7 @@ function ProviderRow({
   opencodeKey,
   dark,
   editingKey,
+  signingInAntigravity,
   busy,
   onToggle,
   onEditKey,
@@ -610,7 +644,8 @@ function ProviderRow({
   const meta = PROVIDER_META[providerId]
   const isOpencode = providerId === 'opencode'
   const showKeyAction = isOpencode && enabled && !editingKey
-  const antigravityAction = providerId === 'antigravity' && enabled ? antigravitySignInAction(entry) : null
+  const antigravityAction =
+    providerId === 'antigravity' && enabled && !signingInAntigravity ? antigravitySignInAction(entry) : null
 
   return html`
     <div className=${SETTINGS_ROW}>
@@ -639,6 +674,8 @@ export function SettingsPage() {
   const snapshot = usePluginData(DATA_CHANNEL, null)
   const [status, setStatus] = useState(DEFAULT_PROVIDER_STATUS)
   const [editingKey, setEditingKey] = useState(false)
+  const [antigravityAuthUrl, setAntigravityAuthUrl] = useState(null)
+  const [antigravityError, setAntigravityError] = useState(null)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -666,9 +703,62 @@ export function SettingsPage() {
     }
   }
 
+  function openExternalUrl(url) {
+    if (!url) return
+    try {
+      window.open(url, '_blank', 'noopener')
+    } catch {}
+  }
+
+  async function handleStartAntigravitySignIn() {
+    setBusy(true)
+    setAntigravityError(null)
+    try {
+      const res = await sendCommand(PLUGIN_ID, 'start-antigravity-signin')
+      if (res && res.ok && res.value && res.value.authUrl) {
+        setAntigravityAuthUrl(res.value.authUrl)
+        openExternalUrl(res.value.authUrl)
+      } else {
+        setAntigravityError((res && res.error) || 'Could not start Antigravity sign-in')
+      }
+    } catch (error) {
+      setAntigravityError((error && error.message) || 'Could not start Antigravity sign-in')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleCompleteAntigravitySignIn(code) {
+    setBusy(true)
+    setAntigravityError(null)
+    try {
+      const res = await sendCommand(PLUGIN_ID, 'complete-antigravity-signin', { code })
+      if (res && res.ok) {
+        if (res.value) setStatus(normalizeProviderStatus(res.value))
+        setAntigravityAuthUrl(null)
+      } else {
+        setAntigravityError((res && res.error) || 'Sign-in failed')
+      }
+    } catch (error) {
+      setAntigravityError((error && error.message) || 'Sign-in failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleCancelAntigravitySignIn() {
+    setAntigravityAuthUrl(null)
+    setAntigravityError(null)
+    await runCommand('cancel-antigravity-signin')
+  }
+
   function handleToggle(providerId, enabled) {
     setStatus((current) => ({ ...current, enabled: { ...current.enabled, [providerId]: enabled } }))
     if (providerId === 'opencode' && !enabled) setEditingKey(false)
+    if (providerId === 'antigravity' && !enabled) {
+      setAntigravityAuthUrl(null)
+      setAntigravityError(null)
+    }
     runCommand('set-provider-enabled', { id: providerId, enabled })
   }
 
@@ -690,11 +780,27 @@ export function SettingsPage() {
                 opencodeKey=${status.opencodeKey}
                 dark=${dark}
                 editingKey=${editingKey}
+                signingInAntigravity=${Boolean(antigravityAuthUrl)}
                 busy=${busy}
                 onToggle=${handleToggle}
                 onEditKey=${() => setEditingKey(true)}
-                onRefreshAntigravity=${() => runCommand('refresh-antigravity-signin')}
+                onRefreshAntigravity=${handleStartAntigravitySignIn}
               />
+              ${id === 'antigravity' &&
+              status.enabled.antigravity !== false &&
+              (antigravityAuthUrl || antigravityError) &&
+              (antigravityAuthUrl
+                ? html`
+                    <${AntigravityLoginEditor}
+                      authUrl=${antigravityAuthUrl}
+                      busy=${busy}
+                      error=${antigravityError}
+                      onSubmit=${handleCompleteAntigravitySignIn}
+                      onOpenLink=${() => openExternalUrl(antigravityAuthUrl)}
+                      onCancel=${handleCancelAntigravitySignIn}
+                    />
+                  `
+                : html`<div className="px-3.5 pb-2.5 text-xs text-danger">${antigravityError}</div>`)}
               ${id === 'opencode' &&
               editingKey &&
               status.enabled.opencode !== false &&

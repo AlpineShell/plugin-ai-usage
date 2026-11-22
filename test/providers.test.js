@@ -18,7 +18,7 @@ const {
 const {
   createAntigravityFetcher,
   findAgyExecutable,
-  launchAntigravityLogin,
+  startAntigravityLogin,
   parseAntigravityModels,
   parseCredentialBlob,
   readAntigravityFileToken,
@@ -294,7 +294,7 @@ describe('Antigravity usage parser and fetcher', () => {
     expect(tokenFromCredential({})).toBeNull()
   })
 
-  test('launches agy acp --login and refreshes Antigravity immediately on exit', async () => {
+  test('starts agy acp --login, returns the Google auth URL, submits the code, and refreshes Antigravity', async () => {
     const tmpData = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-usage-login-'))
     setProviderEnabled(tmpData, 'claude', false)
     setProviderEnabled(tmpData, 'opencode', false)
@@ -304,35 +304,42 @@ describe('Antigravity usage parser and fetcher', () => {
       )
       expect(findAgyExecutable({ env: {}, existsSync: () => false })).toBe('agy')
 
-      let spawnedArgs = null
-      let exitCallback = null
-      const launched = launchAntigravityLogin({
+      const { EventEmitter } = require('events')
+      let writtenCode = null
+      let spawned = null
+      const session = await startAntigravityLogin({
         env: {},
         existsSync: () => false,
-        spawnImpl: (exe, args, opts) => {
-          spawnedArgs = { exe, args, opts }
-          return {
-            once: (event, fn) => {
-              if (event === 'exit') exitCallback = fn
+        spawnImpl: (exe, args) => {
+          spawned = { exe, args }
+          const child = new EventEmitter()
+          child.stdout = new EventEmitter()
+          child.stderr = new EventEmitter()
+          child.stdin = {
+            write: (data) => {
+              writtenCode = data
             },
-            unref: () => {},
+            end: () => {
+              setTimeout(() => child.emit('exit', 0), 5)
+            },
           }
-        },
-        onExit: () => {
-          spawnedArgs.exited = true
+          child.kill = () => {}
+          setTimeout(() => {
+            child.stdout.emit('data', 'Open this link:\n\n  https://accounts.google.com/o/oauth2/auth?client_id=test&state=abc\n')
+          }, 5)
+          return child
         },
       })
-      expect(launched.launched).toBe(true)
-      expect(spawnedArgs.exe).toBe('agy')
-      expect(spawnedArgs.args).toEqual(['acp', '--login'])
-      exitCallback()
-      expect(spawnedArgs.exited).toBe(true)
+      expect(spawned).toEqual({ exe: 'agy', args: ['acp', '--login'] })
+      expect(session.authUrl).toBe('https://accounts.google.com/o/oauth2/auth?client_id=test&state=abc')
+      await expect(session.submit('my-code')).resolves.toEqual({ ok: true })
+      expect(writtenCode).toBe('my-code\n')
 
       const published = []
       let commandHandler = null
-      let triggerLoginExit = null
       let signedIn = false
       let sawForceRead = false
+      let submittedToBackend = null
       const stop = startBackend(
         {
           id: 'alpine-shell.ai-usage',
@@ -361,20 +368,24 @@ describe('Antigravity usage parser and fetcher', () => {
             },
             opencode: async () => ({ id: 'opencode', status: 'no_credentials', plan: null, barPercent: 0, limits: [] }),
           },
-          launchLogin: ({ onExit }) => {
-            triggerLoginExit = onExit
-            return { launched: true }
-          },
+          startLogin: async () => ({
+            authUrl: 'https://accounts.google.com/o/oauth2/auth?state=xyz',
+            submit: async (code) => {
+              submittedToBackend = code
+              signedIn = true
+              return { ok: true }
+            },
+            cancel: () => {},
+          }),
         },
       )
       try {
         await new Promise((resolve) => setTimeout(resolve, 25))
         expect(published[published.length - 1].data.providers.antigravity.status).toBe('expired')
-        await commandHandler('refresh-antigravity-signin')
-        expect(typeof triggerLoginExit).toBe('function')
-        signedIn = true
-        triggerLoginExit()
-        await new Promise((resolve) => setTimeout(resolve, 25))
+        const started = await commandHandler('start-antigravity-signin')
+        expect(started.authUrl).toBe('https://accounts.google.com/o/oauth2/auth?state=xyz')
+        await commandHandler('complete-antigravity-signin', { code: 'paste-code-123' })
+        expect(submittedToBackend).toBe('paste-code-123')
         expect(sawForceRead).toBe(true)
         expect(published[published.length - 1].data.providers.antigravity).toMatchObject({ status: 'ok', barPercent: 15 })
       } finally {

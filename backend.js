@@ -5,7 +5,7 @@ const {
   resolveOpencodeKey,
   saveOpencodeKey,
 } = require('./lib/providers')
-const { launchAntigravityLogin } = require('./lib/antigravity')
+const { startAntigravityLogin } = require('./lib/antigravity')
 const { PROVIDER_IDS, readEnabledProviders, setProviderEnabled } = require('./lib/providerPrefs')
 const { createFetchSchedule } = require('./lib/fetchSchedule')
 const { readCachedUsage, writeCachedUsage } = require('./lib/usageCache')
@@ -21,12 +21,22 @@ const STALE_FALLBACK_STATUSES = new Set(['error', 'expired', 'rate_limited'])
 
 function startBackend(
   ctx,
-  { fetchers = DEFAULT_FETCHERS, pollIntervalMs = POLL_INTERVAL_MS, launchLogin = launchAntigravityLogin } = {},
+  { fetchers = DEFAULT_FETCHERS, pollIntervalMs = POLL_INTERVAL_MS, startLogin = startAntigravityLogin } = {},
 ) {
   const lastOk = readCachedUsage(ctx.dataDir)
   const latest = {}
   const schedule = createFetchSchedule()
   let activeRefresh = null
+  let activeLogin = null
+
+  function cancelActiveLogin() {
+    if (!activeLogin) return
+    const current = activeLogin
+    activeLogin = null
+    try {
+      current.cancel()
+    } catch {}
+  }
 
   function persistCache() {
     writeCachedUsage(ctx.dataDir, lastOk)
@@ -145,16 +155,27 @@ function startBackend(
       await refresh()
       return providerStatus()
     }
-    if (name === 'refresh-antigravity-signin') {
-      launchLogin({
-        onExit: () => {
-          delete latest.antigravity
-          schedule.reset('antigravity')
-          refresh({ forceProvider: 'antigravity' }).catch((error) =>
-            ctx.log('post-login refresh failed: ' + (error && error.message)),
-          )
-        },
-      })
+    if (name === 'start-antigravity-signin' || name === 'refresh-antigravity-signin') {
+      cancelActiveLogin()
+      activeLogin = await startLogin()
+      return { authUrl: activeLogin.authUrl }
+    }
+    if (name === 'complete-antigravity-signin') {
+      if (!activeLogin) throw new Error('Start Antigravity sign-in first')
+      const session = activeLogin
+      const code = payload && typeof payload.code === 'string' ? payload.code : ''
+      try {
+        await session.submit(code)
+      } finally {
+        if (activeLogin === session) activeLogin = null
+      }
+      delete latest.antigravity
+      schedule.reset('antigravity')
+      await refresh({ forceProvider: 'antigravity' })
+      return providerStatus()
+    }
+    if (name === 'cancel-antigravity-signin') {
+      cancelActiveLogin()
       return providerStatus()
     }
     throw new Error('unknown command: ' + name)
@@ -162,6 +183,7 @@ function startBackend(
 
   return () => {
     clearInterval(timer)
+    cancelActiveLogin()
   }
 }
 
